@@ -1,10 +1,10 @@
-const APP_VERSION='5.0.0-refactor';
+const APP_VERSION='5.1.0-editor-safe';
 const W='http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const WP='http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing';
 const A='http://schemas.openxmlformats.org/drawingml/2006/main';
 const M='http://schemas.openxmlformats.org/officeDocument/2006/math';
 
-const Stats=()=>({sections:0,figures:0,anchorsFixed:0,tables:0,captions:0,captionStyled:0,formulas:0,headings:0,citations:0,crossrefs:0,textFixes:0,removed:0,movedMeta:0,citationMerged:0,numberingFixed:0,finalHeadingFixed:0});
+const Stats=()=>({sections:0,figures:0,anchorsFixed:0,tables:0,captions:0,captionStyled:0,formulas:0,headings:0,citations:0,crossrefs:0,textFixes:0,removed:0,movedMeta:0,citationMerged:0,numberingFixed:0,finalHeadingFixed:0,listsFlattened:0,microHeadingsMerged:0});
 const $=id=>document.getElementById(id);
 
 class ChangeRecorder{
@@ -26,6 +26,13 @@ class DocumentSnapshot{
     };
   }
 }
+class PackageSnapshot{
+  static take(zip){
+    const names=Object.keys(zip.files).filter(n=>!zip.files[n].dir).sort();
+    const pick=prefix=>names.filter(n=>n.startsWith(prefix));
+    return {files:names.length,media:pick('word/media/'),embeddings:pick('word/embeddings/'),rels:names.filter(n=>n.endsWith('.rels')).sort()};
+  }
+}
 
 class IntegrityGuard{
   static compare(before,after){
@@ -35,21 +42,32 @@ class IntegrityGuard{
       if(after[k]<before[k]) warnings.push(`${k}: ${before[k]} → ${after[k]}（数量减少）`);
       else ok.push(`${k}: ${after[k]}`);
     }
-    return {before,after,warnings,ok,severe:warnings.some(x=>/math|objects|pict|fields|instrText/.test(x))};
+    return {before,after,warnings,ok,severe:warnings.length>0};
   }
+}
+function sameArray(a,b){return a.length===b.length&&a.every((x,i)=>x===b[i])}
+async function validateGeneratedDocx(blob,packageBefore){
+  const errors=[],checks=[];
+  let zip;
+  try{zip=await JSZip.loadAsync(await blob.arrayBuffer());checks.push('DOCX ZIP 可重新打开')}catch(e){return{ok:false,errors:['输出文件无法重新作为 DOCX ZIP 打开：'+(e.message||e)],checks}}
+  for(const name of ['[Content_Types].xml','_rels/.rels','word/document.xml']){if(!zip.file(name))errors.push(`缺少核心部件：${name}`);else checks.push(`核心部件存在：${name}`)}
+  const f=zip.file('word/document.xml');
+  if(f){const xml=await f.async('string'),doc=new DOMParser().parseFromString(xml,'application/xml');if(doc.getElementsByTagName('parsererror')[0])errors.push('输出 document.xml 无法解析');else if(!doc.getElementsByTagNameNS(W,'body')[0])errors.push('输出 document.xml 缺少正文 body');else checks.push('document.xml 可解析且正文存在')}
+  const after=PackageSnapshot.take(zip);
+  if(!sameArray(packageBefore.media,after.media))errors.push('word/media 媒体文件集合发生变化');else checks.push(`媒体文件保持：${after.media.length} 个`);
+  if(!sameArray(packageBefore.embeddings,after.embeddings))errors.push('word/embeddings 嵌入对象集合发生变化');else checks.push(`嵌入对象保持：${after.embeddings.length} 个`);
+  if(!sameArray(packageBefore.rels,after.rels))errors.push('关系文件集合发生变化');else checks.push(`关系文件保持：${after.rels.length} 个`);
+  return{ok:errors.length===0,errors,checks,before:packageBefore,after};
 }
 
 class DocxContext{
   constructor(file,options,zip,doc,body){
-    this.file=file; this.options=options; this.zip=zip; this.doc=doc; this.body=body;
-    this.stats=Stats(); this.changes=new ChangeRecorder();
+    this.file=file;this.options=options;this.zip=zip;this.doc=doc;this.body=body;
+    this.stats=Stats();this.changes=new ChangeRecorder();
     this.sourceDate=this.findDate();
-    this.before=DocumentSnapshot.take(body); this.guard=null; this.audit=null;
+    this.before=DocumentSnapshot.take(body);this.packageBefore=PackageSnapshot.take(zip);this.guard=null;this.audit=null;
   }
-  findDate(){
-    const p=Array.from(this.body.childNodes).find(n=>n.nodeType===1&&n.namespaceURI===W&&n.localName==='p'&&/^收稿日期[:：]/.test(visibleText(n)));
-    return p?visibleText(p):'';
-  }
+  findDate(){const p=Array.from(this.body.childNodes).find(n=>n.nodeType===1&&n.namespaceURI===W&&n.localName==='p'&&/^收稿日期[:：]/.test(visibleText(n)));return p?visibleText(p):''}
   snapshotStats(){return {...this.stats}}
 }
 
@@ -58,23 +76,16 @@ class RuleEngine{
   async run(ctx){
     for(const phase of ['package','structure','placement','format','post']){
       for(const rule of this.rules.filter(r=>r.phase===phase)){
-        if(rule.enabled&&!rule.enabled(ctx)) continue;
-        const before=ctx.snapshotStats();
-        await rule.apply(ctx);
-        ctx.changes.record(rule.id,rule.label,before,ctx.snapshotStats(),rule.note||'');
+        if(rule.enabled&&!rule.enabled(ctx))continue;
+        const before=ctx.snapshotStats();await rule.apply(ctx);ctx.changes.record(rule.id,rule.label,before,ctx.snapshotStats(),rule.note||'');
       }
     }
   }
 }
-
 class AuditEngine{
   run(ctx){
     ctx.stats.headings=Array.from(ctx.body.childNodes).filter(n=>n.nodeType===1&&n.namespaceURI===W&&n.localName==='p'&&/^(?:\d+(?:\.\d+){0,2})\s+/.test(visibleText(n))).length;
-    const after=DocumentSnapshot.take(ctx.body);
-    ctx.guard=IntegrityGuard.compare(ctx.before,after);
-    ctx.audit=auditDocument(ctx.body,ctx.stats,ctx.sourceDate);
-    ctx.audit.integrity=ctx.guard;
-    return ctx.audit;
+    const after=DocumentSnapshot.take(ctx.body);ctx.guard=IntegrityGuard.compare(ctx.before,after);ctx.audit=auditDocument(ctx.body,ctx.stats,ctx.sourceDate);ctx.audit.integrity=ctx.guard;return ctx.audit;
   }
 }
 
@@ -82,31 +93,27 @@ const RULES=[
   {id:'layout.sections',label:'页面与节版式',phase:'package',enabled:c=>c.options.layout,apply:c=>normalizeSections(c.doc,c.stats)},
   {id:'math.repair',label:'MathType/公式编号保护',phase:'structure',apply:c=>repairMathTypeNumbers(c.body,c.stats)},
   {id:'structure.cleanup',label:'结构清理与元数据归位',phase:'structure',apply:c=>{cleanSeparators(c.body,c.stats);moveMetadata(c.body,c.stats)}},
+  {id:'lists.flatten',label:'自动列表转纯文字编号',phase:'structure',apply:async c=>flattenAutomaticLists(c.body,c.stats,await readNumberingSpec(c.zip))},
   {id:'caption.split',label:'图表题识别与拆分',phase:'structure',apply:c=>splitEmbeddedCaptions(c.body,c.stats)},
   {id:'figures.place',label:'图片安全归位',phase:'placement',enabled:c=>c.options.figures,apply:c=>{let caps=captionMap(c.body);placeFigures(c.body,caps,c.stats)}},
   {id:'tables.place',label:'表格安全归位',phase:'placement',enabled:c=>c.options.figures,apply:c=>{let caps=captionMap(c.body);placeTables(c.body,caps,c.stats)}},
   {id:'format.main',label:'正文与标题确定性格式',phase:'format',apply:c=>applyFormatting(c.body,c.options,c.stats)},
+  {id:'microheading.merge',label:'小标题与说明段合并',phase:'post',enabled:c=>c.options.punct,apply:c=>mergeMicroHeadings(c.body,c.stats)},
   {id:'color.black',label:'正文显式颜色归黑',phase:'post',apply:c=>forcePartColorsBlack(c.doc)},
   {id:'package.aux',label:'编号/样式等辅助部件清理',phase:'post',apply:async c=>normalizeAuxParts(c.zip,c.stats)}
 ];
 
 async function loadDocx(file,options){
-  const zip=await JSZip.loadAsync(await file.arrayBuffer());
-  const f=zip.file('word/document.xml');
-  if(!f) throw new Error('这不是有效 DOCX：缺少 word/document.xml');
-  const xml=await f.async('string');
-  const doc=new DOMParser().parseFromString(xml,'application/xml');
-  if(doc.getElementsByTagName('parsererror')[0]) throw new Error('Word XML 解析失败');
-  const body=doc.getElementsByTagNameNS(W,'body')[0];
-  if(!body) throw new Error('找不到 Word 正文');
-  return new DocxContext(file,options,zip,doc,body);
+  const zip=await JSZip.loadAsync(await file.arrayBuffer());const f=zip.file('word/document.xml');if(!f)throw new Error('这不是有效 DOCX：缺少 word/document.xml');
+  const xml=await f.async('string'),doc=new DOMParser().parseFromString(xml,'application/xml');if(doc.getElementsByTagName('parsererror')[0])throw new Error('Word XML 解析失败');
+  const body=doc.getElementsByTagNameNS(W,'body')[0];if(!body)throw new Error('找不到 Word 正文');return new DocxContext(file,options,zip,doc,body);
 }
-
 async function processDocx(file,options){
-  const ctx=await loadDocx(file,options);
-  await new RuleEngine(RULES).run(ctx);
-  const audit=new AuditEngine().run(ctx);
+  const ctx=await loadDocx(file,options);await new RuleEngine(RULES).run(ctx);const audit=new AuditEngine().run(ctx);
+  if(audit.integrity.warnings.length)throw new Error('完整性守卫发现受保护 Word 对象数量减少，已阻止导出：'+audit.integrity.warnings.join('；'));
   ctx.zip.file('word/document.xml',new XMLSerializer().serializeToString(ctx.doc));
   const blob=await ctx.zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',compression:'DEFLATE'});
-  return {blob,stats:ctx.stats,audit,changes:ctx.changes.items,version:APP_VERSION};
+  audit.outputValidation=await validateGeneratedDocx(blob,ctx.packageBefore);
+  if(!audit.outputValidation.ok)throw new Error('输出 DOCX 自检失败，已阻止下载：'+audit.outputValidation.errors.join('；'));
+  return{blob,stats:ctx.stats,audit,changes:ctx.changes.items,version:APP_VERSION};
 }
