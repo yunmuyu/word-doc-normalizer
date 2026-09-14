@@ -3,24 +3,26 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Word 稿件格式规范化工具 V5 · 重构核心</title>
+<title>Word 稿件格式规范化工具 V5.1 · 编辑安全版</title>
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 <div class="wrap"><div class="card">
-<h1>Word 稿件格式规范化工具 V5 · 重构核心</h1>
-<p class="sub">内部已重构为“文档模型 → 分阶段规则引擎 → 完整性守卫 → 质检引擎 → 输出”的结构。使用方式不变：只自动执行确定性格式规则，不擅自改论文数据；处理后给出变更记录、完整性检查和人工确认清单。文件只在浏览器本地处理。</p>
-<label class="drop" id="drop"><input id="file" type="file" accept=".docx"/><strong id="fileLabel">点击或拖入原版 .docx</strong><small>只支持 DOCX；不会自动改写论文观点或英文摘要内容</small></label>
+<h1>Word 稿件格式规范化工具 V5.1 · 编辑安全版</h1>
+<p class="sub">原稿 DOCX → 确定性规范 → 结构完整性守卫 → 输出 DOCX 重新打开自检 → 人工确认。只改已经确认的期刊格式规则；图、表、公式、MathType/OLE、域、书签、媒体与关系文件都按受保护对象处理。</p>
+<label class="drop" id="drop"><input id="file" type="file" accept=".docx"/><strong id="fileLabel">点击或拖入原版 .docx</strong><small>文件只在浏览器本地处理；结构自检失败时会直接阻止下载</small></label>
 <div class="opts">
 <label class="opt"><input id="optLayout" type="checkbox" checked><div><b>页面与正文基础版式</b><span>A4、上下 72 pt、左右 90 pt；10.5 pt 宋体；正文首行 2 字符、单倍行距、段前后 0</span></div></label>
-<label class="opt"><input id="optFigures" type="checkbox" checked><div><b>图表安全修复</b><span>正文型图片保持原位置和尺寸；浮动图优先按已有图题归位；表格居中但不强制改单元格对齐</span></div></label>
-<label class="opt"><input id="optPunct" type="checkbox" checked><div><b>符号、数字与列表</b><span>比例号、1）式列表、标题双空格、关键词及中英文标签；日期/普通数值范围保持原文</span></div></label>
-<label class="opt"><input id="optRefs" type="checkbox" checked><div><b>引文规范</b><span>[n] 上标；连续 [1][2] / [1,2]→[1-2]；保持公式域、交叉引用域不被重建</span></div></label>
-<label class="opt"><input id="optMarkup" type="checkbox" checked><div><b>正确稿校样标色</b><span>正文引文、正文“图 n/表 n”引用、图表题标黄；其他正文文字统一黑色</span></div></label>
+<label class="opt"><input id="optFigures" type="checkbox" checked><div><b>图表安全修复</b><span>正文型图片保持原位置和尺寸；浮动图按图题/上下文安全归位；表格居中但不强制改单元格对齐</span></div></label>
+<label class="opt"><input id="optPunct" type="checkbox" checked><div><b>符号、数字、单位与列表</b><span>中文双引号；150m→150 m；1234.1588→1 234.158 8；自动列表转纯文字；1）小标题与说明段合并。日期和普通数值范围连接符保持原文</span></div></label>
+<label class="opt"><input id="optRefs" type="checkbox" checked><div><b>引文与参考文献规范</b><span>[1][2]→[1-2]；[1][10]→[1，10]；正文引文上标；参考文献条目转为普通文本“[1] 作者……”</span></div></label>
+<label class="opt"><input id="optMarkup" type="checkbox" checked><div><b>校样标色</b><span>正文引文、正文“图 n/表 n”引用、图表题标黄；其余正文文字统一黑色</span></div></label>
 </div>
 <div class="actions"><button class="btn primary" id="run" disabled>分析并规范化</button><button class="btn primary" id="download" disabled>下载规范化 Word</button><button class="btn ghost" id="reset">重置</button></div>
-<div class="status" id="status"></div><div class="log" id="log"><div class="grid" id="metrics"></div><div class="details" id="details"></div><div class="details changes" id="changes"></div></div><div class="audit" id="audit"><h2>需要你确认</h2><p class="auditSub">这里专门列出机器不应该替你拍板的项目。黄色标记用于校样，不代表错误。</p><div id="autoChecks" class="autoChecks"></div><div id="warnings" class="warnings"></div><div id="manual" class="manual"></div></div>
-<div class="warn">V5 规则边界：不自动改普通数值范围、日期连接符、单位数值或参考文献页码范围；不把正文缺失的“如图 n 所示”直接写进稿件，而是在审核清单里提醒你。连续引文、红字、固定标题、作者简介对齐等确定规则直接处理。</div>
+<div class="status" id="status"></div>
+<div class="log" id="log"><div class="grid" id="metrics"></div><div class="details" id="details"></div><div class="details changes" id="changes"></div></div>
+<div class="audit" id="audit"><h2>需要你确认</h2><p class="auditSub">自动规则只处理已确认的格式。无法可靠替你判断的内容问题会列在这里，不会擅自写进正文。</p><div id="autoChecks" class="autoChecks"></div><div id="warnings" class="warnings"></div><div id="manual" class="manual"></div></div>
+<div class="warn">V5.1 导出策略：先保留原 DOCX 包结构，再修改必要 OOXML；导出后重新解包并检查核心 XML、媒体、嵌入对象和关系文件。任何受保护结构减少或输出包自检失败，直接阻止下载。</div>
 </div></div>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="src/docx-core.js"></script>
